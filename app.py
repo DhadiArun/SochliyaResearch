@@ -402,7 +402,7 @@ Output ONLY valid JSON — no markdown, no preamble."""
         st.error(f"Synthesis JSON parse error: {e}. Returning raw text.")
         return {"executive_summary": raw, "parse_error": True}
 
-def run_full_pipeline(query: str, status_placeholder) -> dict:
+def run_full_pipeline(query: str, status_placeholder, agents=None) -> dict:
     """
     Orchestrates the full multi-agent pipeline.
     Returns a state dict containing all intermediate + final outputs.
@@ -451,7 +451,7 @@ def run_full_pipeline(query: str, status_placeholder) -> dict:
     # ── Node 3: LLM Council ────────────────────────────────────────────────
     t2 = time.time()
     reviews = []
-    for agent in COUNCIL_AGENTS:
+    for agent in (agents or COUNCIL_AGENTS):
         try:
             review = run_council_agent(agent, results["merged_context"], query, status)
             reviews.append(review)
@@ -1127,20 +1127,16 @@ if run_btn:
     elif not anthropic_key:
         st.error("Anthropic API key is required.")
     else:
-        global COUNCIL_AGENTS
         # Filter active council agents
         active_agents = []
         if use_skeptic:    active_agents.append(COUNCIL_AGENTS[0])
         if use_analyst:    active_agents.append(COUNCIL_AGENTS[1])
         if use_strategist: active_agents.append(COUNCIL_AGENTS[2])
 
-        # Temporarily override global list for this run
-        COUNCIL_AGENTS = active_agents
-
         status_placeholder = st.empty()
 
         with st.spinner("Running multi-agent pipeline..."):
-            results = run_full_pipeline(query.strip(), status_placeholder)
+            results = run_full_pipeline(query.strip(), status_placeholder, active_agents)
 
         st.session_state["results"] = results
 
