@@ -1127,6 +1127,7 @@ if run_btn:
     elif not anthropic_key:
         st.error("Anthropic API key is required.")
     else:
+        global COUNCIL_AGENTS
         # Filter active council agents
         active_agents = []
         if use_skeptic:    active_agents.append(COUNCIL_AGENTS[0])
@@ -1134,7 +1135,6 @@ if run_btn:
         if use_strategist: active_agents.append(COUNCIL_AGENTS[2])
 
         # Temporarily override global list for this run
-        global COUNCIL_AGENTS
         COUNCIL_AGENTS = active_agents
 
         status_placeholder = st.empty()
