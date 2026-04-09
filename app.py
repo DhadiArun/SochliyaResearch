@@ -49,6 +49,19 @@ except ImportError:
     GOOGLE_AVAILABLE = False
 
 try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+# requests is stdlib-adjacent, always available via pip
+try:
+    import requests as _requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
+try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
@@ -85,10 +98,100 @@ except ImportError:
 # SECTION 1 — CONFIGURATION & PROMPTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-MODEL_CLAUDE_RESEARCH  = "claude-opus-4-6"          # Deep reasoning for research
-MODEL_CLAUDE_MERGE     = "claude-haiku-4-5-20251001" # Fast + cheap for merge step
-MODEL_CLAUDE_COUNCIL   = "claude-opus-4-6"           # Reasoning depth for critique
-MODEL_CLAUDE_SYNTHESIS = "claude-opus-4-6"           # Highest quality for final report
+MODEL_CLAUDE_RESEARCH  = "claude-opus-4-6"
+MODEL_CLAUDE_MERGE     = "claude-haiku-4-5-20251001"
+MODEL_CLAUDE_COUNCIL   = "claude-opus-4-6"
+MODEL_CLAUDE_SYNTHESIS = "claude-opus-4-6"
+
+# ── LLM Provider Registry ─────────────────────────────────────────────────────
+# Each entry: display name, provider key, model id, api_key_label, placeholder, notes
+LLM_PROVIDERS = [
+    {
+        "name":        "Claude (Anthropic)",
+        "provider":    "anthropic",
+        "model":       "claude-opus-4-6",
+        "key_label":   "Anthropic API Key",
+        "placeholder": "sk-ant-...",
+        "url":         "https://console.anthropic.com/",
+    },
+    {
+        "name":        "GPT-4o (OpenAI)",
+        "provider":    "openai",
+        "model":       "gpt-4o",
+        "key_label":   "OpenAI API Key",
+        "placeholder": "sk-...",
+        "url":         "https://platform.openai.com/api-keys",
+    },
+    {
+        "name":        "GPT-4o Mini (OpenAI)",
+        "provider":    "openai",
+        "model":       "gpt-4o-mini",
+        "key_label":   "OpenAI API Key",
+        "placeholder": "sk-...",
+        "url":         "https://platform.openai.com/api-keys",
+    },
+    {
+        "name":        "Gemini 2.0 Flash (Google)",
+        "provider":    "gemini",
+        "model":       "gemini-2.0-flash",
+        "key_label":   "Google AI API Key",
+        "placeholder": "AIza...",
+        "url":         "https://aistudio.google.com/app/apikey",
+    },
+    {
+        "name":        "Gemini 1.5 Pro (Google)",
+        "provider":    "gemini",
+        "model":       "gemini-1.5-pro-latest",
+        "key_label":   "Google AI API Key",
+        "placeholder": "AIza...",
+        "url":         "https://aistudio.google.com/app/apikey",
+    },
+    {
+        "name":        "Moonshot Kimi (Moonshot AI)",
+        "provider":    "moonshot",
+        "model":       "moonshot-v1-32k",
+        "key_label":   "Moonshot API Key",
+        "placeholder": "sk-...",
+        "url":         "https://platform.moonshot.cn/",
+    },
+    {
+        "name":        "DeepSeek Chat",
+        "provider":    "deepseek",
+        "model":       "deepseek-chat",
+        "key_label":   "DeepSeek API Key",
+        "placeholder": "sk-...",
+        "url":         "https://platform.deepseek.com/",
+    },
+    {
+        "name":        "Mistral Large (Mistral AI)",
+        "provider":    "mistral",
+        "model":       "mistral-large-latest",
+        "key_label":   "Mistral API Key",
+        "placeholder": "...",
+        "url":         "https://console.mistral.ai/",
+    },
+    {
+        "name":        "Llama 3 70B (Groq)",
+        "provider":    "groq",
+        "model":       "llama3-70b-8192",
+        "key_label":   "Groq API Key",
+        "placeholder": "gsk_...",
+        "url":         "https://console.groq.com/keys",
+    },
+    {
+        "name":        "Ollama (Local)",
+        "provider":    "ollama",
+        "model":       "llama3",
+        "key_label":   "Ollama Model Name",
+        "placeholder": "llama3 / mistral / phi3 ...",
+        "url":         "https://ollama.com/",
+    },
+]
+
+LLM_NAMES = [p["name"] for p in LLM_PROVIDERS]
+
+def get_provider_by_name(name: str) -> dict:
+    return next((p for p in LLM_PROVIDERS if p["name"] == name), LLM_PROVIDERS[0])
 
 RESEARCH_SYSTEM_PROMPT = """You are a senior market research analyst at a top-tier consultancy.
 Produce a detailed, structured research report using ONLY the following markdown sections.
@@ -267,12 +370,96 @@ def get_anthropic_client():
         raise ValueError("Anthropic API key not set. Enter it in the sidebar.")
     return anthropic.Anthropic(api_key=key)
 
-def get_gemini_model():
+def get_gemini_model(model_id: str = "gemini-2.0-flash"):
     key = st.session_state.get("google_key") or os.environ.get("GOOGLE_API_KEY", "")
     if not key:
-        raise ValueError("Google API key not set. Enter it in the sidebar.")
+        raise ValueError("Google AI API key not set. Enter it in the sidebar.")
     genai.configure(api_key=key)
-    return genai.GenerativeModel("gemini-2.0-flash")
+    return genai.GenerativeModel(model_id)
+
+def call_llm(provider_name: str, system_prompt: str, user_prompt: str, max_tokens: int = 4096) -> str:
+    """
+    Universal LLM caller. Routes to the correct SDK/API based on provider.
+    Returns the response text as a string.
+    """
+    p = get_provider_by_name(provider_name)
+    provider = p["provider"]
+    model    = p["model"]
+
+    # ── Anthropic ────────────────────────────────────────────────────────────
+    if provider == "anthropic":
+        client = get_anthropic_client()
+        full_text = ""
+        with client.messages.stream(
+            model=model, max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        ) as stream:
+            for text in stream.text_stream:
+                full_text += text
+        return full_text
+
+    # ── Gemini ───────────────────────────────────────────────────────────────
+    elif provider == "gemini":
+        gem_model = get_gemini_model(model)
+        combined  = f"{system_prompt}\n\n{user_prompt}"
+        response  = gem_model.generate_content(
+            combined,
+            generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.3),
+        )
+        return response.text
+
+    # ── OpenAI ───────────────────────────────────────────────────────────────
+    elif provider == "openai":
+        key = st.session_state.get("llm_api_key") or os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            raise ValueError("OpenAI API key not set.")
+        client   = OpenAI(api_key=key)
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[
+                {"role": "system",  "content": system_prompt},
+                {"role": "user",    "content": user_prompt},
+            ],
+        )
+        return response.choices[0].message.content
+
+    # ── OpenAI-compatible (Moonshot, DeepSeek, Groq, Mistral) ───────────────
+    elif provider in ("moonshot", "deepseek", "groq", "mistral"):
+        base_urls = {
+            "moonshot": "https://api.moonshot.cn/v1",
+            "deepseek": "https://api.deepseek.com/v1",
+            "groq":     "https://api.groq.com/openai/v1",
+            "mistral":  "https://api.mistral.ai/v1",
+        }
+        key = st.session_state.get("llm_api_key", "")
+        if not key:
+            raise ValueError(f"{provider.title()} API key not set.")
+        client   = OpenAI(api_key=key, base_url=base_urls[provider])
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+        )
+        return response.choices[0].message.content
+
+    # ── Ollama (local) ───────────────────────────────────────────────────────
+    elif provider == "ollama":
+        ollama_model = st.session_state.get("llm_api_key", "llama3")  # key field holds model name for Ollama
+        base_url     = st.session_state.get("ollama_url", "http://localhost:11434")
+        payload = {
+            "model":  ollama_model,
+            "prompt": f"{system_prompt}\n\n{user_prompt}",
+            "stream": False,
+        }
+        resp = _requests.post(f"{base_url}/api/generate", json=payload, timeout=120)
+        resp.raise_for_status()
+        return resp.json().get("response", "")
+
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
 
 def clean_json(raw: str) -> str:
     """Strip markdown code fences and stray text before/after JSON."""
@@ -290,34 +477,22 @@ def clean_json(raw: str) -> str:
 # SECTION 3 — PIPELINE NODES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_claude_research(query: str, status_cb) -> str:
-    """Calls Claude for primary market research. Returns full markdown text."""
-    status_cb("Calling Claude for primary research...")
-    client = get_anthropic_client()
-    full_text = ""
-    with client.messages.stream(
-        model=MODEL_CLAUDE_RESEARCH,
+def run_llm_research(provider_name: str, query: str, status_cb) -> str:
+    """Calls any configured LLM provider for market research."""
+    status_cb(f"Calling {provider_name} for research...")
+    return call_llm(
+        provider_name=provider_name,
+        system_prompt=RESEARCH_SYSTEM_PROMPT,
+        user_prompt=f"Research query: {query}",
         max_tokens=4096,
-        system=RESEARCH_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"Research query: {query}"}],
-    ) as stream:
-        for text in stream.text_stream:
-            full_text += text
-    return full_text
+    )
+
+# Keep legacy names as thin wrappers so merge/council code still works
+def run_claude_research(query: str, status_cb) -> str:
+    return run_llm_research("Claude (Anthropic)", query, status_cb)
 
 def run_gemini_research(query: str, status_cb) -> str:
-    """Calls Gemini 1.5 Pro for independent market research."""
-    status_cb("Calling Gemini for independent research...")
-    model = get_gemini_model()
-    prompt = f"{RESEARCH_SYSTEM_PROMPT}\n\nResearch query: {query}"
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(
-            max_output_tokens=4096,
-            temperature=0.3,
-        ),
-    )
-    return response.text
+    return run_llm_research(st.session_state.get("llm2_choice", "Gemini 2.0 Flash (Google)"), query, status_cb)
 
 def run_merge(query: str, claude_out: str, gemini_out: str, status_cb) -> str:
     """Merges both research outputs using Claude Haiku (fast + cheap)."""
@@ -413,29 +588,30 @@ def run_full_pipeline(query: str, status_placeholder, agents=None) -> dict:
         status_placeholder.info(f"⚙️ {msg}")
 
     # ── Node 1: Research (model selection aware) ──────────────────────────
-    llm_choice = st.session_state.get("llm_choice", "Claude + Gemini (dual)")
-    status(f"Starting research phase ({llm_choice})...")
-    t0 = time.time()
+    llm1 = st.session_state.get("llm1_choice", "Claude (Anthropic)")
+    llm2 = st.session_state.get("llm2_choice", None)
+    t0   = time.time()
 
-    if llm_choice in ["Claude + Gemini (dual)", "Claude only"]:
-        try:
-            claude_out = run_claude_research(query, status)
-            results["claude_output"] = claude_out
-            status(f"Claude research complete ({len(claude_out):,} chars).")
-        except Exception as e:
-            results["claude_output"] = f"[Claude error: {e}]"
-            st.warning(f"Claude research failed: {e}")
-    else:
-        results["claude_output"] = ""
+    # Primary model
+    status(f"Starting research with {llm1}...")
+    try:
+        out1 = run_llm_research(llm1, query, status)
+        results["claude_output"] = out1   # kept as "claude_output" for UI compatibility
+        status(f"{llm1} research complete ({len(out1):,} chars).")
+    except Exception as e:
+        results["claude_output"] = f"[{llm1} error: {e}]"
+        st.warning(f"{llm1} research failed: {e}")
 
-    if llm_choice in ["Claude + Gemini (dual)", "Gemini only"]:
+    # Secondary model (if dual mode)
+    if llm2 and llm2 != "None (single model)":
+        status(f"Starting research with {llm2}...")
         try:
-            gemini_out = run_gemini_research(query, status)
-            results["gemini_output"] = gemini_out
-            status(f"Gemini research complete ({len(gemini_out):,} chars).")
+            out2 = run_llm_research(llm2, query, status)
+            results["gemini_output"] = out2
+            status(f"{llm2} research complete ({len(out2):,} chars).")
         except Exception as e:
-            results["gemini_output"] = f"[Gemini error: {e}]"
-            st.warning(f"Gemini research failed: {e}")
+            results["gemini_output"] = f"[{llm2} error: {e}]"
+            st.warning(f"{llm2} research failed: {e}")
     else:
         results["gemini_output"] = ""
 
@@ -1074,60 +1250,84 @@ with st.sidebar:
     st.markdown("## ⚙️ Configuration")
     st.markdown("---")
 
-    # ── LLM Provider Selection ───────────────────────────────────────────────
-    st.markdown("**Research LLM**")
-    llm_choice = st.selectbox(
-        "Choose research model(s)",
-        options=["Claude + Gemini (dual)", "Claude only", "Gemini only"],
-        index=0,
-        help="Dual mode runs both models in parallel and merges results for higher accuracy.",
+    # ── Primary LLM ──────────────────────────────────────────────────────────
+    st.markdown("**Primary Research Model**")
+    llm1_choice = st.selectbox(
+        "Primary LLM", options=LLM_NAMES, index=0,
         label_visibility="collapsed",
+        help="This model runs the first research pass.",
     )
-    st.session_state["llm_choice"] = llm_choice
+    st.session_state["llm1_choice"] = llm1_choice
+    p1 = get_provider_by_name(llm1_choice)
+
+    # API key / config for primary
+    if p1["provider"] == "ollama":
+        ollama_model1 = st.text_input("Ollama Model Name", value="llama3", placeholder="llama3 / mistral / phi3")
+        st.session_state["llm_api_key"] = ollama_model1
+        ollama_url = st.text_input("Ollama Base URL", value="http://localhost:11434", placeholder="http://localhost:11434")
+        st.session_state["ollama_url"] = ollama_url
+    elif p1["provider"] == "anthropic":
+        k = st.text_input(p1["key_label"], type="password",
+                          value=st.session_state.get("anthropic_key",""), placeholder=p1["placeholder"])
+        if k: st.session_state["anthropic_key"] = k
+    elif p1["provider"] == "gemini":
+        k = st.text_input(p1["key_label"], type="password",
+                          value=st.session_state.get("google_key",""), placeholder=p1["placeholder"])
+        if k: st.session_state["google_key"] = k
+    else:
+        k = st.text_input(p1["key_label"], type="password",
+                          value=st.session_state.get("llm_api_key",""), placeholder=p1["placeholder"])
+        if k: st.session_state["llm_api_key"] = k
+
+    st.caption(f"[Get API key ↗]({p1['url']})")
 
     st.markdown("---")
-    st.markdown("**API Keys**")
 
-    # Show only relevant key inputs based on selection
-    anthropic_key = ""
-    google_key    = ""
+    # ── Secondary LLM (optional) ──────────────────────────────────────────────
+    st.markdown("**Secondary Research Model** *(optional — enables dual-model mode)*")
+    llm2_options = ["None (single model)"] + LLM_NAMES
+    llm2_choice  = st.selectbox(
+        "Secondary LLM", options=llm2_options, index=0,
+        label_visibility="collapsed",
+        help="Add a second model to run in parallel and merge results.",
+    )
+    st.session_state["llm2_choice"] = llm2_choice
 
-    if llm_choice in ["Claude + Gemini (dual)", "Claude only"]:
-        anthropic_key = st.text_input(
-            "Anthropic API Key",
-            type="password",
-            value=st.session_state.get("anthropic_key", ""),
-            placeholder="sk-ant-...",
-            help="Required for Claude research, merge, council, and synthesis.",
-        )
-        if anthropic_key:
-            st.session_state["anthropic_key"] = anthropic_key
-
-    if llm_choice in ["Claude + Gemini (dual)", "Gemini only"]:
-        google_key = st.text_input(
-            "Google AI API Key",
-            type="password",
-            value=st.session_state.get("google_key", ""),
-            placeholder="AIza...",
-            help="Required for Gemini research.",
-        )
-        if google_key:
-            st.session_state["google_key"] = google_key
-
-    # Warn if Gemini only but no Anthropic key for council/synthesis
-    if llm_choice == "Gemini only":
-        st.info("ℹ️ Council & Synthesis steps still use Claude. An Anthropic key is needed for those.", icon="ℹ️")
-        anthropic_key_council = st.text_input(
-            "Anthropic API Key (council & synthesis)",
-            type="password",
-            value=st.session_state.get("anthropic_key", ""),
-            placeholder="sk-ant-...",
-            help="Used only for the LLM Council and Synthesis steps.",
-        )
-        if anthropic_key_council:
-            st.session_state["anthropic_key"] = anthropic_key_council
+    if llm2_choice != "None (single model)":
+        p2 = get_provider_by_name(llm2_choice)
+        if p2["provider"] == "ollama":
+            ollama_model2 = st.text_input("Ollama Model (secondary)", value="mistral", placeholder="mistral / phi3")
+            st.session_state["llm2_api_key"] = ollama_model2
+        elif p2["provider"] == "anthropic":
+            k2 = st.text_input(f"{p2['key_label']} (secondary)", type="password",
+                               value=st.session_state.get("anthropic_key",""), placeholder=p2["placeholder"])
+            if k2: st.session_state["anthropic_key"] = k2
+        elif p2["provider"] == "gemini":
+            k2 = st.text_input(f"{p2['key_label']} (secondary)", type="password",
+                               value=st.session_state.get("google_key",""), placeholder=p2["placeholder"])
+            if k2: st.session_state["google_key"] = k2
+        else:
+            k2 = st.text_input(f"{p2['key_label']} (secondary)", type="password",
+                               value=st.session_state.get("llm2_api_key",""), placeholder=p2["placeholder"])
+            if k2: st.session_state["llm2_api_key"] = k2
+        st.caption(f"[Get API key ↗]({p2['url']})")
 
     st.markdown("---")
+
+    # ── Claude always needed for council + synthesis ──────────────────────────
+    primary_is_claude = p1["provider"] == "anthropic"
+    if not primary_is_claude:
+        st.markdown("**Anthropic Key** *(for Council & Synthesis)*")
+        claude_k = st.text_input(
+            "Anthropic API Key", type="password",
+            value=st.session_state.get("anthropic_key",""), placeholder="sk-ant-...",
+            help="The LLM Council and Synthesis steps always use Claude.",
+            key="anthropic_council_key",
+        )
+        if claude_k: st.session_state["anthropic_key"] = claude_k
+        st.caption("[Get Anthropic key ↗](https://console.anthropic.com/)")
+        st.markdown("---")
+
     st.markdown("**Council Settings**")
     use_skeptic    = st.checkbox("Enable The Skeptic",          value=True)
     use_analyst    = st.checkbox("Enable Financial Analyst",    value=True)
@@ -1140,17 +1340,15 @@ with st.sidebar:
         st.markdown(f"{icon} {name}")
     lib_status(ANTHROPIC_AVAILABLE, "anthropic")
     lib_status(GOOGLE_AVAILABLE,    "google-generativeai")
+    lib_status(OPENAI_AVAILABLE,    "openai")
     lib_status(REPORTLAB_AVAILABLE, "reportlab (PDF)")
     lib_status(DOCX_AVAILABLE,      "python-docx (DOCX)")
     lib_status(PPTX_AVAILABLE,      "python-pptx (PPTX)")
 
     st.markdown("---")
-    mode_desc = {
-        "Claude + Gemini (dual)": "Claude + Gemini → Merge → Council → Synthesis",
-        "Claude only":            "Claude → Council → Synthesis",
-        "Gemini only":            "Gemini → Council (Claude) → Synthesis (Claude)",
-    }
-    st.markdown(f"**Pipeline:** {mode_desc.get(llm_choice, '')}")
+    dual = llm2_choice != "None (single model)"
+    pipeline_str = f"{llm1_choice} {'+ ' + llm2_choice + ' → Merge' if dual else ''} → Council (Claude) → Synthesis"
+    st.caption(f"**Pipeline:** {pipeline_str}")
 
 # ── Main header ────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -1175,10 +1373,8 @@ with col_btn:
 if run_btn:
     if not query.strip():
         st.warning("Please enter a research query.")
-    elif llm_choice in ["Claude + Gemini (dual)", "Claude only"] and not st.session_state.get("anthropic_key"):
-        st.error("Anthropic API key is required for the selected model.")
-    elif llm_choice == "Gemini only" and not st.session_state.get("google_key"):
-        st.error("Google AI API key is required for Gemini.")
+    elif not st.session_state.get("anthropic_key"):
+        st.error("An Anthropic API key is required for the Council & Synthesis steps.")
     else:
         # Filter active council agents
         active_agents = []
