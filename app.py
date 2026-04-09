@@ -622,13 +622,10 @@ def run_full_pipeline(query: str, status_placeholder, agents=None) -> dict:
     claude_out_for_merge = results.get("claude_output", "")
     gemini_out_for_merge = results.get("gemini_output", "")
 
-    if llm_choice == "Claude only":
-        # No merge needed — use Claude output directly
+    llm2 = st.session_state.get("llm2_choice", "None (single model)")
+    if not llm2 or llm2 == "None (single model)" or not gemini_out_for_merge:
+        # Single model — skip merge
         results["merged_context"] = claude_out_for_merge
-        status("Single model — skipping merge step.")
-    elif llm_choice == "Gemini only":
-        # No merge needed — use Gemini output directly
-        results["merged_context"] = gemini_out_for_merge
         status("Single model — skipping merge step.")
     else:
         try:
