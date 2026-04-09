@@ -272,7 +272,7 @@ def get_gemini_model():
     if not key:
         raise ValueError("Google API key not set. Enter it in the sidebar.")
     genai.configure(api_key=key)
-    return genai.GenerativeModel("gemini-1.5-pro")
+    return genai.GenerativeModel("gemini-2.0-flash")
 
 def clean_json(raw: str) -> str:
     """Strip markdown code fences and stray text before/after JSON."""
@@ -412,40 +412,57 @@ def run_full_pipeline(query: str, status_placeholder, agents=None) -> dict:
     def status(msg: str):
         status_placeholder.info(f"⚙️ {msg}")
 
-    # ── Node 1: Parallel Research ──────────────────────────────────────────
-    # Note: Streamlit is synchronous; we run models sequentially.
-    # In production FastAPI, replace with asyncio.gather for true parallelism.
-    status("Starting dual-model research phase...")
+    # ── Node 1: Research (model selection aware) ──────────────────────────
+    llm_choice = st.session_state.get("llm_choice", "Claude + Gemini (dual)")
+    status(f"Starting research phase ({llm_choice})...")
     t0 = time.time()
 
-    try:
-        claude_out = run_claude_research(query, status)
-        results["claude_output"] = claude_out
-        status(f"Claude research complete ({len(claude_out):,} chars).")
-    except Exception as e:
-        results["claude_output"] = f"[Claude error: {e}]"
-        st.warning(f"Claude research failed: {e}")
+    if llm_choice in ["Claude + Gemini (dual)", "Claude only"]:
+        try:
+            claude_out = run_claude_research(query, status)
+            results["claude_output"] = claude_out
+            status(f"Claude research complete ({len(claude_out):,} chars).")
+        except Exception as e:
+            results["claude_output"] = f"[Claude error: {e}]"
+            st.warning(f"Claude research failed: {e}")
+    else:
+        results["claude_output"] = ""
 
-    try:
-        gemini_out = run_gemini_research(query, status)
-        results["gemini_output"] = gemini_out
-        status(f"Gemini research complete ({len(gemini_out):,} chars).")
-    except Exception as e:
-        results["gemini_output"] = f"[Gemini error: {e}]"
-        st.warning(f"Gemini research failed: {e}")
+    if llm_choice in ["Claude + Gemini (dual)", "Gemini only"]:
+        try:
+            gemini_out = run_gemini_research(query, status)
+            results["gemini_output"] = gemini_out
+            status(f"Gemini research complete ({len(gemini_out):,} chars).")
+        except Exception as e:
+            results["gemini_output"] = f"[Gemini error: {e}]"
+            st.warning(f"Gemini research failed: {e}")
+    else:
+        results["gemini_output"] = ""
 
     results["research_time_s"] = round(time.time() - t0, 1)
 
     # ── Node 2: Merge ──────────────────────────────────────────────────────
     t1 = time.time()
-    try:
-        merged = run_merge(query, results["claude_output"], results["gemini_output"], status)
-        results["merged_context"] = merged
-        conflict_count = merged.count("[CONFLICT:")
-        status(f"Merge complete. Found {conflict_count} conflict(s) between models.")
-    except Exception as e:
-        results["merged_context"] = results.get("claude_output", "")
-        st.warning(f"Merge failed, using Claude output only: {e}")
+    claude_out_for_merge = results.get("claude_output", "")
+    gemini_out_for_merge = results.get("gemini_output", "")
+
+    if llm_choice == "Claude only":
+        # No merge needed — use Claude output directly
+        results["merged_context"] = claude_out_for_merge
+        status("Single model — skipping merge step.")
+    elif llm_choice == "Gemini only":
+        # No merge needed — use Gemini output directly
+        results["merged_context"] = gemini_out_for_merge
+        status("Single model — skipping merge step.")
+    else:
+        try:
+            merged = run_merge(query, claude_out_for_merge, gemini_out_for_merge, status)
+            results["merged_context"] = merged
+            conflict_count = merged.count("[CONFLICT:")
+            status(f"Merge complete. Found {conflict_count} conflict(s) between models.")
+        except Exception as e:
+            results["merged_context"] = claude_out_for_merge or gemini_out_for_merge
+            st.warning(f"Merge failed, using single output: {e}")
     results["merge_time_s"] = round(time.time() - t1, 1)
 
     # ── Node 3: LLM Council ────────────────────────────────────────────────
@@ -1056,23 +1073,59 @@ stButton button { border-radius: 8px; font-weight: 600; }
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
     st.markdown("---")
+
+    # ── LLM Provider Selection ───────────────────────────────────────────────
+    st.markdown("**Research LLM**")
+    llm_choice = st.selectbox(
+        "Choose research model(s)",
+        options=["Claude + Gemini (dual)", "Claude only", "Gemini only"],
+        index=0,
+        help="Dual mode runs both models in parallel and merges results for higher accuracy.",
+        label_visibility="collapsed",
+    )
+    st.session_state["llm_choice"] = llm_choice
+
+    st.markdown("---")
     st.markdown("**API Keys**")
-    anthropic_key = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        value=st.session_state.get("anthropic_key",""),
-        placeholder="sk-ant-...",
-        help="Used for Claude research, merge, council, and synthesis.",
-    )
-    google_key = st.text_input(
-        "Google AI API Key",
-        type="password",
-        value=st.session_state.get("google_key",""),
-        placeholder="AIza...",
-        help="Used for Gemini 1.5 Pro independent research.",
-    )
-    if anthropic_key: st.session_state["anthropic_key"] = anthropic_key
-    if google_key:    st.session_state["google_key"]    = google_key
+
+    # Show only relevant key inputs based on selection
+    anthropic_key = ""
+    google_key    = ""
+
+    if llm_choice in ["Claude + Gemini (dual)", "Claude only"]:
+        anthropic_key = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            value=st.session_state.get("anthropic_key", ""),
+            placeholder="sk-ant-...",
+            help="Required for Claude research, merge, council, and synthesis.",
+        )
+        if anthropic_key:
+            st.session_state["anthropic_key"] = anthropic_key
+
+    if llm_choice in ["Claude + Gemini (dual)", "Gemini only"]:
+        google_key = st.text_input(
+            "Google AI API Key",
+            type="password",
+            value=st.session_state.get("google_key", ""),
+            placeholder="AIza...",
+            help="Required for Gemini research.",
+        )
+        if google_key:
+            st.session_state["google_key"] = google_key
+
+    # Warn if Gemini only but no Anthropic key for council/synthesis
+    if llm_choice == "Gemini only":
+        st.info("ℹ️ Council & Synthesis steps still use Claude. An Anthropic key is needed for those.", icon="ℹ️")
+        anthropic_key_council = st.text_input(
+            "Anthropic API Key (council & synthesis)",
+            type="password",
+            value=st.session_state.get("anthropic_key", ""),
+            placeholder="sk-ant-...",
+            help="Used only for the LLM Council and Synthesis steps.",
+        )
+        if anthropic_key_council:
+            st.session_state["anthropic_key"] = anthropic_key_council
 
     st.markdown("---")
     st.markdown("**Council Settings**")
@@ -1092,14 +1145,12 @@ with st.sidebar:
     lib_status(PPTX_AVAILABLE,      "python-pptx (PPTX)")
 
     st.markdown("---")
-    st.markdown("""
-**Pipeline Flow:**
-1. Claude + Gemini (parallel)
-2. Merge + conflict detection
-3. LLM Council (3 agents)
-4. Synthesis agent
-5. Export (PDF/DOCX/PPTX)
-""")
+    mode_desc = {
+        "Claude + Gemini (dual)": "Claude + Gemini → Merge → Council → Synthesis",
+        "Claude only":            "Claude → Council → Synthesis",
+        "Gemini only":            "Gemini → Council (Claude) → Synthesis (Claude)",
+    }
+    st.markdown(f"**Pipeline:** {mode_desc.get(llm_choice, '')}")
 
 # ── Main header ────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -1124,8 +1175,10 @@ with col_btn:
 if run_btn:
     if not query.strip():
         st.warning("Please enter a research query.")
-    elif not anthropic_key:
-        st.error("Anthropic API key is required.")
+    elif llm_choice in ["Claude + Gemini (dual)", "Claude only"] and not st.session_state.get("anthropic_key"):
+        st.error("Anthropic API key is required for the selected model.")
+    elif llm_choice == "Gemini only" and not st.session_state.get("google_key"):
+        st.error("Google AI API key is required for Gemini.")
     else:
         # Filter active council agents
         active_agents = []
